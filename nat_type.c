@@ -21,7 +21,7 @@ typedef enum {
 	RestricNAT,
 	RestricPortNAT,
 	SymmetricNAT,
-	error,
+	Error,
 } nat_type_t;
 
 static const char* nat_types[] = {
@@ -85,9 +85,6 @@ const static uint16_t ChangeRequest    = 0x0003; /* CHANGE-REQUEST, and CHANGED-
 const static uint16_t MessageIntegrity = 0x0008;
 const static uint16_t ErrorCode        = 0x0009;
 const static uint16_t UnknownAttribute = 0x000A;
-const static uint16_t ReflectedFrom    = 0x000B;
-const static uint16_t Realm            = 0x0014;
-const static uint16_t Nonce            = 0x0015;
 const static uint16_t XorMappedAddress = 0x0020;
 
 const static uint32_t StunMagicCookie  = 0x2112A442; // introduced since rfc 5389
@@ -358,9 +355,8 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char* local_host, uint16_t local_port)
 {
 	int s;
-	if((s = socket(AF_INET, SOCK_DGRAM, 0)) <= 0)  
-	{  
-		return error;  
+	if((s = socket(AF_INET, SOCK_DGRAM, 0)) <= 0)  {  
+		return Error;  
 	}
 
 	int reuse_addr = 1;
@@ -377,15 +373,15 @@ nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char
 	local_addr.sin_port = htons(DEFAULT_LOCAL_PORT);  
 	bind(s, (struct sockaddr *)&local_addr, sizeof(local_addr));
 
-	if (!stun_host)
+	if (!stun_host) {
 		stun_host = STUN_SERVER;
+	}
 
 	// 0 for mapped addr, 1 for changed addr, 2 for source addr
 	StunAtrAddress bind_result[3];
 
 	memset(bind_result, 0, sizeof(StunAtrAddress) * 3);
-	if (send_bind_request(s, stun_host, stun_port, 0, 0, bind_result))
-	{
+	if (send_bind_request(s, stun_host, stun_port, 0, 0, bind_result)) {
 		return Blocked;
 	}
 	
@@ -397,23 +393,38 @@ nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char
 	uint32_t source_port = bind_result[2].port;
 
 	// some implementations of stun server don't offer source address.
-	if (ext_ip == source_ip)
-	{
+	if (ext_ip == source_ip) {
 		return OpenInternet;
-	}
-	else if (send_bind_request(s, stun_host, stun_port, ChangeIpFlag, ChangePortFlag, bind_result))
-	{
-		// some servers don't have second ip
-		struct in_addr addr = {changed_ip};
-		char* alt_host = inet_ntoa(addr);
-		memset(bind_result, 0, sizeof(StunAtrAddress) * 3);
-		if (send_bind_request(s, alt_host, changed_port, 0, 0, bind_result))
-		{
-			return RestricNAT;
+	} else { 
+		if (changed_ip != 0 && changed_port != 0) {
+			if (send_bind_request(s, stun_host, stun_port, ChangeIpFlag, ChangePortFlag, bind_result)) {
+				struct in_addr addr = {changed_ip};
+				char* alt_host = inet_ntoa(addr);
+				memset(bind_result, 0, sizeof(StunAtrAddress) * 3);
+				if (send_bind_request(s, alt_host, changed_port, 0, 0, bind_result)) {
+					printf("failed to send request to alterative server\n");
+					return Error;
+				}
+
+				if (ext_ip != bind_result[0].addr.ipv4 || ext_port != bind_result[0].port) {
+					return SymmetricNAT;
+				}
+
+				if (send_bind_request(s, alt_host, changed_port, 0, ChangePortFlag, bind_result)) {
+					return RestricPortNAT;
+				}
+
+				return RestricNAT;
+			}
+			else {
+				return FullCone;	
+			}
+		} else {
+			printf("no alterative server, can't detect nat type\n");
+			return Error;
 		}
 	}
 
-	return FullCone;	
 }
 
 int main()
