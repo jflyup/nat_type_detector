@@ -263,6 +263,8 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
     struct hostent *server = gethostbyname(remote_host);
 	if (server == NULL) {
 		fprintf(stderr, "no such host, %s\n", remote_host);
+		free(buf);
+
 		return -1;
 	}
 	struct sockaddr_in remote_addr;
@@ -273,6 +275,8 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 
 	if (-1 == sendto(sock, buf, ptr - buf, 0, (struct sockaddr *)&remote_addr, sizeof(remote_addr)))
 	{
+		free(buf);
+
 		return -1;
 	}
 
@@ -283,10 +287,13 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 	tv.tv_usec = 0;
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
-	int recv_bytes = recvfrom(sock, buf, 512, 0, (struct sockaddr *)&remote_addr, &fromlen);
+	int recv_bytes = recvfrom(sock, buf, MAX_STUN_MESSAGE_LENGTH, 0, (struct sockaddr *)&remote_addr, &fromlen);
 
-	if (recv_bytes < sizeof(StunHeader))
+	int header_length = sizeof(StunHeader);
+	if (recv_bytes < header_length)
 	{
+		free(buf);
+
 		return -1;
 	}
 
@@ -315,6 +322,8 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 
             if ( attrLen + attrLenPad + 4 > size ) 
             {
+				free(buf);
+
                 return -1;
             }
 
@@ -326,25 +335,30 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
             case MappedAddress:
                 if (stun_parse_atr_addr(body, attrLen, addr_array))
                 {
+					free(buf);
+
                     return -1;
                 }
                 break;
             case ChangedAddress:
                 if (stun_parse_atr_addr( body, attrLen, addr_array + 1))
                 {
+					free(buf);
+
                     return -1;
                 }
                 break;
             case SourceAddress:
                 if (stun_parse_atr_addr( body, attrLen, addr_array + 2))
                 {
-				return -1;
+					free(buf);
+
+					return -1;
                 }
                 break;
             default:
                 // ignore
                 break;
-
             }
             body += attrLen + attrLenPad;
             size -= attrLen + attrLenPad;
@@ -504,7 +518,7 @@ int main(int argc, char** argv)
 	nat_type_t type = detect_nat_type(stun_server, stun_port, local_host, local_port, ext_ip, &ext_port);
 
 	printf("NAT type: %s\n", nat_types[type]);
-    if (type != Error)
+    if (type != Error && type != Blocked)
         printf("external address: %s:%d\n", ext_ip, ext_port);
 
     return 0;
