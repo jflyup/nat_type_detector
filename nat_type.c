@@ -1,106 +1,40 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <errno.h>
 #include <unistd.h>
-
+#include <errno.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h> 
 
-#define DEFAULT_STUN_SERVER_PORT 3478
-#define DEFAULT_LOCAL_PORT 34780
-#define MAX_STUN_MESSAGE_LENGTH 512
-
-// const static constants cannot be used in case label
-#define MappedAddress 0x0001
-#define SourceAddress 0x0004
-#define ChangedAddress 0x0005
-
-static char* STUN_SERVER = "stun.ideasip.com";
-
-typedef enum {
-	Blocked,
-	OpenInternet,
-	FullCone,
-	RestricNAT,
-	RestricPortNAT,
-	SymmetricNAT,
-	Error,
-} nat_type_t;
+#include "nat_type.h"
 
 static const char* nat_types[] = {
 	"blocked",
 	"open internet",
 	"full cone",
 	"restricted NAT",
-	"Port-restricted cone",
+	"port-restricted cone",
 	"symmetric NAT",
 	"error"
 };
 
-// define stun address families
-const static uint8_t  IPv4Family = 0x01;
-const static uint8_t  IPv6Family = 0x02;
-
-// The following are codepoints used in the requested transport header, they
-// are the same values used in the IPv4 and IPv6 headers
-const static uint32_t RequestedTransportUdp = 17;
-const static uint32_t RequestedTransportTcp = 6;
-
-// define  flags  
-const static uint32_t ChangeIpFlag   = 0x04;
-const static uint32_t ChangePortFlag = 0x02;
-
-
-// Message Type - from RFC5389
-//
-//        0                   1                   2                   3
-//        0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-//       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-//       |0 0|     STUN Message Type     |         Message Length        |
-//       |   |M|M|M|M|M|C|M|M|M|C|M|M|M|M|                               |
-//       |   |1|1|9|8|7|1|6|5|4|0|3|2|1|0|                               |
-//       |   |1|0| | | | | | | | | | | | |                               |
-//       |   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+                               |
-//
-// M11 through M0 represent a 12-bit encoding of the method
-// C1 through C0 represent a 2 bit encoding of the class.
-// 2-bit Class Values are: 00=Request, 01=Indicaiton, 
-//                         10=Success Response, 11=Error Response
-//
-
-const static uint16_t StunClassRequest            = 0x0000;
-const static uint16_t StunClassIndication         = 0x0010;
-const static uint16_t StunClassSuccessResponse    = 0x0100;
-const static uint16_t StunClassErrorResponse      = 0x0110; 
-
-// define types for a stun message - RFC5389
-const static uint16_t BindRequest                 = 0x0001;
-const static uint16_t BindResponse     = 0x0101;
-
-const static uint16_t ResponseAddress  = 0x0002;
-const static uint16_t ChangeRequest    = 0x0003; /* CHANGE-REQUEST, and CHANGED-ADDRESS, that have been
-												 removed from rfc5389.*/
-const static uint16_t MessageIntegrity = 0x0008;
-const static uint16_t ErrorCode        = 0x0009;
-const static uint16_t UnknownAttribute = 0x000A;
-const static uint16_t XorMappedAddress = 0x0020;
-
-const static uint32_t StunMagicCookie  = 0x2112A442; // introduced since rfc 5389
-
-typedef struct { uint32_t longpart[4]; }  UInt128;
-typedef struct { uint32_t longpart[3]; }  UInt96;
-
-#ifndef htonll // there is already a htonll macro in Yosemite
+#ifndef htonll
 uint64_t htonll(uint64_t v) {
 	union { uint32_t lv[2]; uint64_t llv; } u;
 	u.lv[0] = htonl(v >> 32);
 	u.lv[1] = htonl(v & 0xFFFFFFFFULL);
 	return u.llv;
+}
+#endif
+
+#ifndef ntohll
+uint64_t ntohll(uint64_t v) {
+	union { uint32_t lv[2]; uint64_t llv; } u;
+	u.llv = v;
+	return ((uint64_t)ntohl(u.lv[0]) << 32) | (uint64_t)ntohl(u.lv[1]);
 }
 #endif
 
@@ -132,6 +66,7 @@ char* encodeAtrUInt32(char* ptr, uint16_t type, uint32_t value)
 	ptr = encode16(ptr, type);
 	ptr = encode16(ptr, 4);
 	ptr = encode32(ptr, value);
+
 	return ptr;
 }
 
@@ -140,6 +75,7 @@ char* encodeAtrUInt64(char* ptr, uint16_t type, uint64_t value)
 	ptr = encode16(ptr, type);
 	ptr = encode16(ptr, 8);
 	ptr = encode64(ptr, value);
+
 	return ptr;
 }
 
@@ -149,41 +85,7 @@ char* encode(char* buf, const char* data, unsigned int length)
 	return buf + length;
 }
 
-typedef struct 
-{
-	uint32_t magicCookie; // rfc 5389
-	UInt96 tid;
-} Id;
-
-typedef struct 
-{
-	uint16_t msgType;
-	uint16_t msgLength; // message length not including header
-	union
-	{
-		UInt128 magicCookieAndTid;
-		Id id;
-	};
-} StunHeader;
-
-typedef struct
-{
-	uint16_t type;
-	uint16_t length;
-} StunAtrHdr;
-
-typedef struct
-{
-	uint8_t family;
-	uint16_t port;
-	union
-	{
-		uint32_t ipv4;  // in host byte order
-		UInt128 ipv6; // in network byte order
-	} addr;
-} StunAtrAddress;
-
-int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress* result )
+static int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress* result )
 {
 	if (hdrLen != 8 /* ipv4 size */ && hdrLen != 20 /* ipv6 size */ )
 	{
@@ -196,28 +98,24 @@ int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress* result
 	memcpy(&nport, body, 2); body+=2;
 	result->port = ntohs(nport);
 
-	if (result->family == IPv4Family)
-	{		
+	if (result->family == IPv4Family) {		
 		uint32_t naddr;
 		memcpy(&naddr, body, sizeof(uint32_t)); body+=sizeof(uint32_t);
 		result->addr.ipv4 = ntohl(naddr);
 		// Note:  addr.ipv4 is stored in host byte order
 		return 0;
-	}
-	else if (result->family == IPv6Family)
-	{
+	} else if (result->family == IPv6Family) {
 		printf("ipv6 is not implemented yet");
 		return -1;
 	}
-	else
-	{
+	else {
 		return -1;
 	}
 
 	return -1;
 }
 
-void gen_random_string(char *s, const int len) {
+static void gen_random_string(char *s, const int len) {
 	static const char alphanum[] =
 		"0123456789"
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -231,13 +129,12 @@ void gen_random_string(char *s, const int len) {
 	s[len] = 0;
 }
 
-int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, uint32_t change_ip, uint32_t change_port, StunAtrAddress* addr_array)
-{
+static int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, uint32_t change_ip, uint32_t change_port, StunAtrAddress* addr_array) {
 	char* buf = malloc(MAX_STUN_MESSAGE_LENGTH);
 	char* ptr = buf;
 
 	StunHeader h;
-	h.msgType = StunClassRequest | BindRequest; // This unfortunate encoding is due to assignment of values in [RFC3489]
+	h.msgType = BindRequest;
 	
 	gen_random_string((char*)&h.magicCookieAndTid, 16);
 
@@ -250,20 +147,14 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 	{
 		ptr = encodeAtrUInt32(ptr, ChangeRequest, change_ip | change_port);
 
-		// message length
+		// length of stun body
 		encode16(lengthp, ptr - buf - sizeof(StunHeader));
 	}
-
-	// todo
-	/**
-	* It is RECOMMENDED that the server check the Binding Request for a
-	* MESSAGE-INTEGRITY attribute
-	**/
 
     struct hostent *server = gethostbyname(remote_host);
 	if (server == NULL) {
 		fprintf(stderr, "no such host, %s\n", remote_host);
-		free(buf);
+        free(buf);
 
 		return -1;
 	}
@@ -275,7 +166,7 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 
 	if (-1 == sendto(sock, buf, ptr - buf, 0, (struct sockaddr *)&remote_addr, sizeof(remote_addr)))
 	{
-		free(buf);
+        free(buf);
 
 		return -1;
 	}
@@ -283,16 +174,12 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 	socklen_t fromlen = sizeof remote_addr;
 
 	struct timeval tv;
-	tv.tv_sec = 1;
+	tv.tv_sec = 5;
 	tv.tv_usec = 0;
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
 
-	int recv_bytes = recvfrom(sock, buf, MAX_STUN_MESSAGE_LENGTH, 0, (struct sockaddr *)&remote_addr, &fromlen);
-
-	int header_length = sizeof(StunHeader);
-	if (recv_bytes < header_length)
-	{
-		free(buf);
+	if (recvfrom(sock, buf, 512, 0, (struct sockaddr *)&remote_addr, &fromlen) <= 0) {
+        free(buf);
 
 		return -1;
 	}
@@ -302,7 +189,7 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 
 	uint16_t msg_type = ntohs(reply_header.msgType);
 
-	if (msg_type == (StunClassSuccessResponse | BindRequest)) {
+	if (msg_type == BindResponse) {
         char* body = buf + sizeof(StunHeader);
         uint16_t size = ntohs(reply_header.msgLength);
 
@@ -322,7 +209,7 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
 
             if ( attrLen + attrLenPad + 4 > size ) 
             {
-				free(buf);
+                free(buf);
 
                 return -1;
             }
@@ -335,7 +222,7 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
             case MappedAddress:
                 if (stun_parse_atr_addr(body, attrLen, addr_array))
                 {
-					free(buf);
+                    free(buf);
 
                     return -1;
                 }
@@ -343,7 +230,7 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
             case ChangedAddress:
                 if (stun_parse_atr_addr( body, attrLen, addr_array + 1))
                 {
-					free(buf);
+                    free(buf);
 
                     return -1;
                 }
@@ -351,9 +238,9 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
             case SourceAddress:
                 if (stun_parse_atr_addr( body, attrLen, addr_array + 2))
                 {
-					free(buf);
+                    free(buf);
 
-					return -1;
+                    return -1;
                 }
                 break;
             default:
@@ -366,10 +253,15 @@ int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, u
     }
 	
 	free(buf);
+
 	return 0;
 }
 
-nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char* local_host, uint16_t local_port, char* ext_ip, uint16_t* ext_port)
+const char* get_nat_desc(nat_type type) {
+	return nat_types[type];
+}
+
+nat_type detect_nat_type(const char* stun_host, uint16_t stun_port, const char* local_host, uint16_t local_port, char* ext_ip, uint16_t* ext_port)
 {
     uint32_t mapped_ip = 0;
     uint16_t mapped_port = 0;
@@ -378,7 +270,7 @@ nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char
 		return Error;  
 	}
 
-    nat_type_t nat_type;
+    nat_type nat_type;
 
 	int reuse_addr = 1;
 
@@ -393,7 +285,7 @@ nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char
         if (errno == EADDRINUSE) {
             printf("addr in use, try another port\n");
             nat_type = Error;
-            goto cleanup_socket;
+            goto cleanup_sock;
         }
     }
 
@@ -403,7 +295,7 @@ nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char
 	memset(bind_result, 0, sizeof(StunAtrAddress) * 2);
 	if (send_bind_request(s, stun_host, stun_port, 0, 0, bind_result)) {
 		nat_type = Blocked;
-        goto cleanup_socket;
+        goto cleanup_sock;
 	}
 
 	mapped_ip = bind_result[0].addr.ipv4; // in host byte order
@@ -429,7 +321,7 @@ nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char
 
 	if (!strcmp(local_host, inet_ntoa(mapped_addr))) {
         nat_type = OpenInternet;
-		goto cleanup_socket;
+		goto cleanup_sock;
 	} else { 
 		if (changed_ip != 0 && changed_port != 0) {
 			if (send_bind_request(s, stun_host, stun_port, ChangeIpFlag, ChangePortFlag, bind_result)) {
@@ -441,33 +333,33 @@ nat_type_t detect_nat_type(const char* stun_host, uint16_t stun_port, const char
 				if (send_bind_request(s, alt_host, changed_port, 0, 0, bind_result)) {
 					printf("failed to send request to alterative server\n");
                     nat_type = Error;
-                    goto cleanup_socket;
+                    goto cleanup_sock;
 				}
 
 				if (mapped_ip != bind_result[0].addr.ipv4 || mapped_port != bind_result[0].port) {
 					nat_type = SymmetricNAT;
-                    goto cleanup_socket;
+                    goto cleanup_sock;
 				}
 
 				if (send_bind_request(s, alt_host, changed_port, 0, ChangePortFlag, bind_result)) {
 					nat_type = RestricPortNAT;
-                    goto cleanup_socket;
+                    goto cleanup_sock;
 				}
 
 				nat_type = RestricNAT;
-                goto cleanup_socket;
+                goto cleanup_sock;
 			}
 			else {
 				nat_type = FullCone;	
-                goto cleanup_socket;
+                goto cleanup_sock;
 			}
 		} else {
 			printf("no alterative server, can't detect nat type\n");
 			nat_type = Error;
-            goto cleanup_socket;
+            goto cleanup_sock;
 		}
 	}
-cleanup_socket:
+cleanup_sock:
     close(s);
     struct in_addr ext_addr;
     ext_addr.s_addr = htonl(mapped_ip);
@@ -475,51 +367,4 @@ cleanup_socket:
     *ext_port = mapped_port;
 
     return nat_type;
-}
-
-int main(int argc, char** argv)
-{
-    char* stun_server = STUN_SERVER;
-    char* local_host = "0.0.0.0";
-    uint16_t stun_port = DEFAULT_STUN_SERVER_PORT;
-    uint16_t local_port = DEFAULT_LOCAL_PORT;
-
-    static char usage[] = "usage: [-h] [-H STUN_HOST] [-P STUN_PORT] [-i SOURCE_IP] [-p SOURCE_PORT]\n";
-    int opt;
-    while ((opt = getopt (argc, argv, "H:h:P:p:i")) != -1)
-    {
-        switch (opt)
-        {
-            case 'h':
-                printf("%s", usage);
-                break;
-            case 'H':
-                stun_server = optarg;
-                break;
-            case 'P':
-                stun_port = atoi(optarg);
-                break;
-            case 'p':
-                local_port = atoi(optarg);
-            case 'i':
-                local_host = optarg;
-            case '?':
-            default:
-                printf("invalid option: %c\n", opt);
-                printf("%s", usage);
-
-                return -1;
-        }
-    }
-
-    char ext_ip[16] = {0};
-    uint16_t ext_port = 0;
-
-	nat_type_t type = detect_nat_type(stun_server, stun_port, local_host, local_port, ext_ip, &ext_port);
-
-	printf("NAT type: %s\n", nat_types[type]);
-    if (type != Error && type != Blocked)
-        printf("external address: %s:%d\n", ext_ip, ext_port);
-
-    return 0;
 }
