@@ -19,18 +19,6 @@ typedef enum {
 #define SourceAddress 0x0004
 #define ChangedAddress 0x0005
 
-enum msg_type {
-	Enroll = 0x01,
-	GetPeerInfo = 0x02,
-	NotifyPeer = 0x03,
-};
-
-typedef struct {
-    char ip[16];
-    uint16_t port;
-    uint16_t type;
-} nat_info_t;
-
 // define stun constants
 const static uint8_t  IPv4Family = 0x01;
 const static uint8_t  IPv6Family = 0x02;
@@ -86,4 +74,5 @@ typedef struct
 } StunAtrAddress;
 
 nat_type detect_nat_type(const char* stun_host, uint16_t stun_port, const char* local_host, uint16_t local_port, char* ext_ip, uint16_t* ext_port);
+
 const char* get_nat_desc(nat_type type);

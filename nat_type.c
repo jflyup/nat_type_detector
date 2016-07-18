@@ -21,23 +21,6 @@ static const char* nat_types[] = {
 	"error"
 };
 
-#ifndef htonll
-uint64_t htonll(uint64_t v) {
-	union { uint32_t lv[2]; uint64_t llv; } u;
-	u.lv[0] = htonl(v >> 32);
-	u.lv[1] = htonl(v & 0xFFFFFFFFULL);
-	return u.llv;
-}
-#endif
-
-#ifndef ntohll
-uint64_t ntohll(uint64_t v) {
-	union { uint32_t lv[2]; uint64_t llv; } u;
-	u.llv = v;
-	return ((uint64_t)ntohl(u.lv[0]) << 32) | (uint64_t)ntohl(u.lv[1]);
-}
-#endif
-
 char* encode16(char* buf, uint16_t data)
 {
 	uint16_t ndata = htons(data);
@@ -53,28 +36,11 @@ char* encode32(char* buf, uint32_t data)
 	return buf + sizeof(uint32_t);
 }
 
-char* encode64(char* buf, const uint64_t data)
-{
-	uint64_t ndata = htonll(data);
-	memcpy(buf, (void*)(&ndata), sizeof(uint64_t));
-
-	return buf + sizeof(uint64_t);
-}
-
 char* encodeAtrUInt32(char* ptr, uint16_t type, uint32_t value)
 {
 	ptr = encode16(ptr, type);
 	ptr = encode16(ptr, 4);
 	ptr = encode32(ptr, value);
-
-	return ptr;
-}
-
-char* encodeAtrUInt64(char* ptr, uint16_t type, uint64_t value)
-{
-	ptr = encode16(ptr, type);
-	ptr = encode16(ptr, 8);
-	ptr = encode64(ptr, value);
 
 	return ptr;
 }
@@ -87,15 +53,15 @@ char* encode(char* buf, const char* data, unsigned int length)
 
 static int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress* result )
 {
-	if (hdrLen != 8 /* ipv4 size */ && hdrLen != 20 /* ipv6 size */ )
-	{
+	if (hdrLen == 8 /* ipv4 size */ && hdrLen != 20 /* ipv6 size */ ) {
 		return -1;
 	}
 	body++;  // Skip pad
 	result->family = *body++;
 
 	uint16_t nport;
-	memcpy(&nport, body, 2); body+=2;
+	memcpy(&nport, body, 2);
+    body+=2;
 	result->port = ntohs(nport);
 
 	if (result->family == IPv4Family) {		
@@ -106,10 +72,6 @@ static int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress*
 		return 0;
 	} else if (result->family == IPv6Family) {
 		printf("ipv6 is not implemented yet");
-		return -1;
-	}
-	else {
-		return -1;
 	}
 
 	return -1;
@@ -143,8 +105,7 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
 	ptr = encode16(ptr, 0);
 	ptr = encode(ptr, (const char*)&h.id, sizeof(h.id));
 
-	if (change_ip || change_port)
-	{
+	if (change_ip || change_port) {
 		ptr = encodeAtrUInt32(ptr, ChangeRequest, change_ip | change_port);
 
 		// length of stun body
@@ -164,8 +125,7 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
 	memcpy(&remote_addr.sin_addr.s_addr, server->h_addr_list[0], server->h_length);
 	remote_addr.sin_port = htons(remote_port); 
 
-	if (-1 == sendto(sock, buf, ptr - buf, 0, (struct sockaddr *)&remote_addr, sizeof(remote_addr)))
-	{
+	if (-1 == sendto(sock, buf, ptr - buf, 0, (struct sockaddr *)&remote_addr, sizeof(remote_addr))) {
         free(buf);
 
 		return -1;
@@ -198,8 +158,7 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
         unsigned int attrLenPad;  
         int atrType;
 
-        while (size > 0)
-        {
+        while (size > 0) {
             attr = (StunAtrHdr*)(body);
 
             attrLen = ntohs(attr->length);
@@ -207,8 +166,7 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
             attrLenPad = attrLen % 4 == 0 ? 0 : 4 - (attrLen % 4);  
             atrType = ntohs(attr->type);
 
-            if ( attrLen + attrLenPad + 4 > size ) 
-            {
+            if ( attrLen + attrLenPad + 4 > size ) {
                 free(buf);
 
                 return -1;
@@ -217,27 +175,23 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
             body += 4; // skip the length and type in attribute header
             size -= 4;
 
-            switch (atrType)
-            {
+            switch (atrType) {
             case MappedAddress:
-                if (stun_parse_atr_addr(body, attrLen, addr_array))
-                {
+                if (stun_parse_atr_addr(body, attrLen, addr_array)) {
                     free(buf);
 
                     return -1;
                 }
                 break;
             case ChangedAddress:
-                if (stun_parse_atr_addr( body, attrLen, addr_array + 1))
-                {
+                if (stun_parse_atr_addr( body, attrLen, addr_array + 1)) {
                     free(buf);
 
                     return -1;
                 }
                 break;
             case SourceAddress:
-                if (stun_parse_atr_addr( body, attrLen, addr_array + 2))
-                {
+                if (stun_parse_atr_addr( body, attrLen, addr_array + 2)) {
                     free(buf);
 
                     return -1;
@@ -261,8 +215,7 @@ const char* get_nat_desc(nat_type type) {
 	return nat_types[type];
 }
 
-nat_type detect_nat_type(const char* stun_host, uint16_t stun_port, const char* local_host, uint16_t local_port, char* ext_ip, uint16_t* ext_port)
-{
+nat_type detect_nat_type(const char* stun_host, uint16_t stun_port, const char* local_host, uint16_t local_port, char* ext_ip, uint16_t* ext_port) {
     uint32_t mapped_ip = 0;
     uint16_t mapped_port = 0;
 	int s;
