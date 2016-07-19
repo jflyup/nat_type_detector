@@ -53,7 +53,7 @@ char* encode(char* buf, const char* data, unsigned int length)
 
 static int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress* result )
 {
-	if (hdrLen == 8 /* ipv4 size */ && hdrLen != 20 /* ipv6 size */ ) {
+	if (hdrLen != 8 /* ipv4 size */ && hdrLen != 20 /* ipv6 size */ ) {
 		return -1;
 	}
 	body++;  // Skip pad
