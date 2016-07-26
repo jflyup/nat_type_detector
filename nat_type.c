@@ -21,23 +21,20 @@ static const char* nat_types[] = {
 	"error"
 };
 
-char* encode16(char* buf, uint16_t data)
-{
+char* encode16(char* buf, uint16_t data) {
 	uint16_t ndata = htons(data);
 	memcpy(buf, (void*)(&ndata), sizeof(uint16_t));
 	return buf + sizeof(uint16_t);
 }
 
-char* encode32(char* buf, uint32_t data)
-{
+char* encode32(char* buf, uint32_t data) {
 	uint32_t ndata = htonl(data);
 	memcpy(buf, (void*)(&ndata), sizeof(uint32_t));
 
 	return buf + sizeof(uint32_t);
 }
 
-char* encodeAtrUInt32(char* ptr, uint16_t type, uint32_t value)
-{
+char* encodeAtrUInt32(char* ptr, uint16_t type, uint32_t value) {
 	ptr = encode16(ptr, type);
 	ptr = encode16(ptr, 4);
 	ptr = encode32(ptr, value);
@@ -45,34 +42,31 @@ char* encodeAtrUInt32(char* ptr, uint16_t type, uint32_t value)
 	return ptr;
 }
 
-char* encode(char* buf, const char* data, unsigned int length)
-{
+char* encode(char* buf, const char* data, unsigned int length) {
 	memcpy(buf, data, length);
 	return buf + length;
 }
 
-static int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress* result )
-{
-	if (hdrLen != 8 /* ipv4 size */ && hdrLen != 20 /* ipv6 size */ ) {
-		return -1;
-	}
-	body++;  // Skip pad
-	result->family = *body++;
+static int stun_parse_atr_addr( char* body, unsigned int hdrLen, StunAtrAddress* result ) {
+	if (hdrLen == 8 /* ipv4 size */ || hdrLen == 20 /* ipv6 size */ ) {
+        body++;  // Skip pad
+        result->family = *body++;
 
-	uint16_t nport;
-	memcpy(&nport, body, 2);
-    body+=2;
-	result->port = ntohs(nport);
+        uint16_t nport;
+        memcpy(&nport, body, 2);
+        body += 2;
+        result->port = ntohs(nport);
 
-	if (result->family == IPv4Family) {		
-		uint32_t naddr;
-		memcpy(&naddr, body, sizeof(uint32_t)); body+=sizeof(uint32_t);
-		result->addr.ipv4 = ntohl(naddr);
-		// Note:  addr.ipv4 is stored in host byte order
-		return 0;
-	} else if (result->family == IPv6Family) {
-		printf("ipv6 is not implemented yet");
-	}
+        if (result->family == IPv4Family) {		
+            uint32_t naddr;
+            memcpy(&naddr, body, sizeof(uint32_t)); body+=sizeof(uint32_t);
+            result->addr.ipv4 = ntohl(naddr);
+            // Note:  addr.ipv4 is stored in host byte order
+            return 0;
+        } else if (result->family == IPv6Family) {
+            printf("ipv6 is not implemented yet");
+        }
+    }
 
 	return -1;
 }
@@ -91,7 +85,7 @@ static void gen_random_string(char *s, const int len) {
 	s[len] = 0;
 }
 
-static int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, uint32_t change_ip, uint32_t change_port, StunAtrAddress* addr_array) {
+static int send_bind_request(int sock, const char* remote_host, uint16_t remote_port, uint32_t change_flag, StunAtrAddress* addr_array, char* pkt_dst) {
 	char* buf = malloc(MAX_STUN_MESSAGE_LENGTH);
 	char* ptr = buf;
 
@@ -105,8 +99,8 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
 	ptr = encode16(ptr, 0);
 	ptr = encode(ptr, (const char*)&h.id, sizeof(h.id));
 
-	if (change_ip || change_port) {
-		ptr = encodeAtrUInt32(ptr, ChangeRequest, change_ip | change_port);
+	if (change_flag) {
+		ptr = encodeAtrUInt32(ptr, ChangeRequest, change_flag);
 
 		// length of stun body
 		encode16(lengthp, ptr - buf - sizeof(StunHeader));
@@ -127,23 +121,60 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
 
 	if (-1 == sendto(sock, buf, ptr - buf, 0, (struct sockaddr *)&remote_addr, sizeof(remote_addr))) {
         free(buf);
-
-		return -1;
+        return -1;
 	}
 
-	socklen_t fromlen = sizeof remote_addr;
-
-	struct timeval tv;
-	tv.tv_sec = 5;
-	tv.tv_usec = 0;
+	struct timeval tv = {5, 0};
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#ifdef __linux__ 
+    if (pkt_dst) {
+        // IP_PKTINFO is Linux-specific, use this flag to get local address from ancillary message
+        int opt = 1;
+        setsockopt(sock, IPPROTO_IP, IP_PKTINFO, &opt, sizeof(opt));
+        char cmsg_buf[512];
+        struct sockaddr_in dst_addr;
+        struct iovec iov;
+        iov.iov_base = buf;
+        iov.iov_len = 512;
 
+        // msg_iov 
+        struct msghdr mh = {
+            .msg_name = &dst_addr,
+            .msg_namelen = sizeof(dst_addr),
+            .msg_control = cmsg_buf,
+            .msg_controllen = sizeof(cmsg_buf),
+            .msg_iov = &iov,
+            .msg_iovlen = 1,
+        };
+
+        if (recvmsg(sock, &mh, 0) <=0) {
+            free(buf);
+            return -1;
+        }
+
+        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&mh);
+        for (; cmsg != NULL; cmsg = CMSG_NXTHDR(&mh, cmsg)) {
+            if (cmsg->cmsg_level != IPPROTO_IP || cmsg->cmsg_type != IP_PKTINFO) {
+                continue;
+            }
+            struct in_pktinfo *pi = CMSG_DATA(cmsg);
+            strcpy(pkt_dst, inet_ntoa(pi->ipi_spec_dst));
+        }
+    } else {
+        socklen_t fromlen = sizeof remote_addr;
+        if (recvfrom(sock, buf, 512, 0, (struct sockaddr *)&remote_addr, &fromlen) <= 0) {
+            free(buf);
+            return -1;
+        }
+    }
+#else
+	socklen_t fromlen = sizeof remote_addr;
 	if (recvfrom(sock, buf, 512, 0, (struct sockaddr *)&remote_addr, &fromlen) <= 0) {
         free(buf);
-
-		return -1;
+        return -1;
 	}
 
+#endif
 	StunHeader reply_header;
 	memcpy(&reply_header, buf, sizeof(StunHeader));
 
@@ -168,7 +199,6 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
 
             if ( attrLen + attrLenPad + 4 > size ) {
                 free(buf);
-
                 return -1;
             }
 
@@ -179,21 +209,18 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
             case MappedAddress:
                 if (stun_parse_atr_addr(body, attrLen, addr_array)) {
                     free(buf);
-
                     return -1;
                 }
                 break;
             case ChangedAddress:
                 if (stun_parse_atr_addr( body, attrLen, addr_array + 1)) {
                     free(buf);
-
                     return -1;
                 }
                 break;
             case SourceAddress:
                 if (stun_parse_atr_addr( body, attrLen, addr_array + 2)) {
                     free(buf);
-
                     return -1;
                 }
                 break;
@@ -205,10 +232,9 @@ static int send_bind_request(int sock, const char* remote_host, uint16_t remote_
             size -= attrLen + attrLenPad;
         }
     }
-	
-	free(buf);
 
-	return 0;
+    free(buf);
+    return 0;
 }
 
 const char* get_nat_desc(nat_type type) {
@@ -222,32 +248,29 @@ nat_type detect_nat_type(const char* stun_host, uint16_t stun_port, const char* 
 	if((s = socket(AF_INET, SOCK_DGRAM, 0)) <= 0)  {  
 		return Error;  
 	}
-
     nat_type nat_type;
-
-	int reuse_addr = 1;
-
-	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse_addr, sizeof(reuse_addr));
 
 	struct sockaddr_in local_addr;
 	local_addr.sin_family = AF_INET;
     local_addr.sin_addr.s_addr = inet_addr(local_host);
-
 	local_addr.sin_port = htons(local_port);  
+
 	if (bind(s, (struct sockaddr *)&local_addr, sizeof(local_addr))) {
         if (errno == EADDRINUSE) {
             printf("addr in use, try another port\n");
-            nat_type = Error;
-            goto cleanup_sock;
         }
+
+        nat_type = Error;
+        goto cleanup_sock;
     }
 
 	// 0 for mapped addr, 1 for changed addr
 	StunAtrAddress bind_result[2];
-
 	memset(bind_result, 0, sizeof(StunAtrAddress) * 2);
-	if (send_bind_request(s, stun_host, stun_port, 0, 0, bind_result)) {
-		nat_type = Blocked;
+
+    char pkt_dst[32] = {0};
+	if (send_bind_request(s, stun_host, stun_port, 0, bind_result, pkt_dst)) {
+        nat_type = Blocked;
         goto cleanup_sock;
 	}
 
@@ -259,31 +282,18 @@ nat_type detect_nat_type(const char* stun_host, uint16_t stun_port, const char* 
     struct in_addr mapped_addr;
     mapped_addr.s_addr = htonl(mapped_ip);
 
-    /*
-    * it's complicated to get the RECEIVER address of UDP packet,
-    * For Linux, use the setsockopt() called IP_PKTINFO 
-    * which will get you a parameter over recvmsg() called 
-    * IP_PKTINFO, which carries a struct in_pktinfo, 
-    * which has a 4 byte IP address hiding in its ipi_addr field.
-    */
-
-    /* TODO use getifaddrs() to get interface address, 
-    * then compare it with mapped address to determine
-    * if it's open internet
-    */
-
-	if (!strcmp(local_host, inet_ntoa(mapped_addr))) {
+	if (!strcmp(pkt_dst, inet_ntoa(mapped_addr))) {
         nat_type = OpenInternet;
 		goto cleanup_sock;
 	} else { 
 		if (changed_ip != 0 && changed_port != 0) {
-			if (send_bind_request(s, stun_host, stun_port, ChangeIpFlag, ChangePortFlag, bind_result)) {
+			if (send_bind_request(s, stun_host, stun_port, ChangeIpFlag | ChangePortFlag, bind_result, NULL)) {
 				struct in_addr addr = {changed_ip};
 				char* alt_host = inet_ntoa(addr);
 
 				memset(bind_result, 0, sizeof(StunAtrAddress) * 2);
 
-				if (send_bind_request(s, alt_host, changed_port, 0, 0, bind_result)) {
+				if (send_bind_request(s, alt_host, changed_port, 0, bind_result, NULL)) {
 					printf("failed to send request to alterative server\n");
                     nat_type = Error;
                     goto cleanup_sock;
@@ -294,7 +304,7 @@ nat_type detect_nat_type(const char* stun_host, uint16_t stun_port, const char* 
                     goto cleanup_sock;
 				}
 
-				if (send_bind_request(s, alt_host, changed_port, 0, ChangePortFlag, bind_result)) {
+				if (send_bind_request(s, alt_host, changed_port, ChangePortFlag, bind_result, NULL)) {
 					nat_type = RestricPortNAT;
                     goto cleanup_sock;
 				}
