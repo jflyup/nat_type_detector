@@ -28,11 +28,11 @@ int main(int argc, char** argv)
             case 'P':
                 stun_port = atoi(optarg);
                 break;
-            case 'p':
-                local_port = atoi(optarg);
-                break;
             case 'i':
                 local_host = optarg;
+                break;
+            case 'p':
+                local_port = atoi(optarg);
                 break;
             case '?':
             default:
@@ -46,14 +46,14 @@ int main(int argc, char** argv)
     char ext_ip[16] = {0};
     uint16_t ext_port = 0;
 
-	nat_type type = detect_nat_type(stun_server, stun_port, local_host, local_port, ext_ip, &ext_port);
+    nat_type type = detect_nat_type(stun_server, stun_port, local_host, local_port, ext_ip, &ext_port);
 
-	printf("NAT type: %s\n", get_nat_desc(type));
+    printf("NAT type: %s\n", get_nat_desc(type));
     if (ext_port) {
         printf("external address: %s:%d\n", ext_ip, ext_port);
     } else {
         return -1;
     }
 
-	return 0;
+    return 0;
 }
